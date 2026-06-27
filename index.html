@@ -436,36 +436,32 @@ function openReplaceCamera() {
 async function addReplacement(file) {
   if (selectedIdx < 0) { showToast('Select a page to replace first'); return; }
 
-  showProgress('Processing replacement...', 30);
   const ab = await file.arrayBuffer();
   let replacementBytes = ab;
   let replacementType = file.type;
   let replacementName = file.name;
 
   if (file.type.startsWith('image/')) {
-    // ─── EXIF orientation correction (same trick as image-to-pdf app) ───
-    // pdf-lib ignores EXIF rotation tags. Draw image through a canvas
-    // element so the browser applies EXIF orientation, then export.
+    // EXIF orientation fix — draw through canvas so rotation is baked in
     try {
-      const correctedAb = await orientImage(file);
-      replacementBytes = correctedAb;
-    } catch (e) {
-      console.warn('Orientation correction failed, using raw bytes:', e);
-    }
+      const dataUrl = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(file); });
+      const img = await new Promise(r => { const el = new Image(); el.onload = () => r(el); el.src = dataUrl; });
+      const cv = document.createElement('canvas');
+      cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+      cv.getContext('2d').drawImage(img, 0, 0);
+      const blob = await new Promise(r => cv.toBlob(r, file.type, file.type === 'image/jpeg' ? 0.95 : undefined));
+      replacementBytes = await blob.arrayBuffer();
+    } catch (e) { /* fallback to raw bytes */ }
 
-    showProgress('Building replacement page...', 60);
-    // Convert corrected image to PDF page using pdf-lib
+    // Convert image to PDF page using pdf-lib
     const { PDFDocument } = PDFLib;
     const pdfDoc = await PDFDocument.create();
     let img;
     if (file.type === 'image/png') img = await pdfDoc.embedPng(replacementBytes);
     else img = await pdfDoc.embedJpg(replacementBytes);
 
-    const page = pdfDoc.addPage([595, 842]); // A4 default
-    const scale = Math.min(
-      page.getWidth() / img.width,
-      page.getHeight() / img.height
-    );
+    const page = pdfDoc.addPage([595, 842]);
+    const scale = Math.min(page.getWidth() / img.width, page.getHeight() / img.height);
     const x = (page.getWidth() - img.width * scale) / 2;
     const y = (page.getHeight() - img.height * scale) / 2;
     page.drawImage(img, { x, y, width: img.width * scale, height: img.height * scale });
@@ -473,7 +469,6 @@ async function addReplacement(file) {
     replacementBytes = await pdfDoc.save();
     replacementType = 'application/pdf';
   } else if (file.type === 'application/pdf') {
-    // If it's a multi-page PDF, just take the first page
     try {
       const tmpDoc = await PDFLib.PDFDocument.load(ab);
       if (tmpDoc.getPageCount() > 1) {
@@ -483,42 +478,8 @@ async function addReplacement(file) {
     } catch (e) { /* use original bytes */ }
   }
 
-  hideProgress();
   pendingReplacement = { bytes: replacementBytes, type: replacementType, name: replacementName };
   showPreview();
-}
-
-// ─── EXIF Orientation Correction ───
-// Camera photos embed rotation in EXIF. Browsers rotate <img> but
-// pdf-lib reads raw pixels. We draw through a canvas to "bake in"
-// the correct orientation.
-async function orientImage(file) {
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-
-  const img = await new Promise((resolve, reject) => {
-    const el = new Image();
-    el.onload = () => resolve(el);
-    el.onerror = reject;
-    el.src = dataUrl;
-  });
-
-  const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0);
-
-  // Export as blob with appropriate mime
-  const mime = file.type === 'image/png' ? 'image/png' :
-               file.type === 'image/webp' ? 'image/webp' : 'image/jpeg';
-  const quality = mime === 'image/jpeg' ? 0.95 : undefined;
-  const blob = await new Promise(r => canvas.toBlob(r, mime, quality));
-  return await blob.arrayBuffer();
 }
 
 // ─── Preview ───
